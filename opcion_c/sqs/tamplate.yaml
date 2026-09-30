@@ -1,0 +1,55 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Colas de opcion-c — SSE-SQS y retencion de 14 dias."
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: "API Gateway recibe el PDF o una clave S3 y Lambda firma en la misma llamada"
+    must:
+      - "La cola guarda fallos de firma para reproceso manual"
+    ref:
+      - at: context/compartido.yaml
+        has: convenciones comunes de cifrado, custodia y carpetas
+        scope: shared
+      - at: requerimientos.txt
+        has: pedido de vias asincronas y endpoint sincrono
+        scope: shared
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: firma-digital
+    AllowedPattern: "^[a-z0-9-]{1,20}$"
+    Description: Prefijo de nombres. Minusculas, numeros y guion.
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, prod]
+    Description: Entorno. Tambien es el nombre del stage de API Gateway.
+
+Resources:
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "Aisla mensajes que la Lambda no pudo firmar."
+        must:
+          - "SSE-SQS encendido"
+          - "Retencion 14 dias"
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Option
+          Value: opcion-c
+
+Outputs:
+
+  QueueArn:
+    Value: !GetAtt DeadLetterQueue.Arn
+  QueueUrl:
+    Value: !Ref DeadLetterQueue

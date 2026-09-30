@@ -1,0 +1,75 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Llave de firma ECC P-256 de opcion-b — KMS firma el hash; esta llave no cifra el bucket."
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: "DataSync deposita en sin-firmar; Scheduler cada 15 min lista y Lambda firma con KMS"
+    must:
+      - "KeyUsage SIGN_VERIFY y KeySpec ECC_NIST_P256"
+      - "La politica deja administrar la llave a la cuenta via IAM"
+      - "Retain para no borrar material de firma al eliminar el stack"
+    ref:
+      - at: context/compartido.yaml
+        has: convenciones comunes de cifrado, custodia y carpetas
+        scope: shared
+      - at: requerimientos.txt
+        has: pedido de vias asincronas y endpoint sincrono
+        scope: shared
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: firma-digital
+    AllowedPattern: "^[a-z0-9-]{1,20}$"
+    Description: Prefijo de nombres. Minusculas, numeros y guion.
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, prod]
+    Description: Entorno. Tambien es el nombre del stage de API Gateway.
+
+Resources:
+  SigningKey:
+    Type: AWS::KMS::Key
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "Firma ECDSA del SHA-256 del PDF. No rota: KMS no rota llaves asimetricas de firma."
+        must:
+          - "No usar esta llave como SSE-KMS del bucket"
+          - "PendingWindowInDays 30"
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub Firma ECC P-256 ${ProjectName} ${Environment} opcion-b
+      KeySpec: ECC_NIST_P256
+      KeyUsage: SIGN_VERIFY
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableIam
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: "*"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Option
+          Value: opcion-b
+  SigningAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/${ProjectName}-${Environment}-b
+      TargetKeyId: !Ref SigningKey
+Outputs:
+  KeyId:
+    Value: !Ref SigningKey
+  KeyArn:
+    Value: !GetAtt SigningKey.Arn
+  AliasName:
+    Value: !Ref SigningAlias

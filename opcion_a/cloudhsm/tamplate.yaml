@@ -1,0 +1,113 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CloudHSM de opcion-a — el cluster y dos HSM solo se crean con DeployCloudHsm=true."
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: "API prefirma PUT, S3 sin-firmar avisa a SQS y Lambda firma con KMS hacia firmados"
+    must:
+      - "Por defecto no hay HSM y no hay cargo por hora"
+      - "Si se activa, son dos hsm2m.medium en dos zonas"
+      - "Retain: borrar el stack no debe destruir el HSM sin una decision aparte"
+    ref:
+      - at: context/compartido.yaml
+        has: convenciones comunes de cifrado, custodia y carpetas
+        scope: shared
+      - at: requerimientos.txt
+        has: pedido de vias asincronas y endpoint sincrono
+        scope: shared
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: firma-digital
+    AllowedPattern: "^[a-z0-9-]{1,20}$"
+    Description: Prefijo de nombres. Minusculas, numeros y guion.
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, prod]
+    Description: Entorno. Tambien es el nombre del stage de API Gateway.
+
+  DeployCloudHsm:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: true crea dos HSM y asocia las Lambdas a la VPC. Cada HSM se cobra por hora.
+
+  SubnetA:
+    Type: String
+    Description: Primera subred del cluster.
+  SubnetB:
+    Type: String
+    Description: Segunda subred del cluster.
+  AzA:
+    Type: String
+    Description: Zona de la primera subred.
+  AzB:
+    Type: String
+    Description: Zona de la segunda subred.
+Conditions:
+  UseHsm: !Equals [!Ref DeployCloudHsm, "true"]
+Resources:
+  ModeMarker:
+    Type: AWS::SSM::Parameter
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "Marca el modo de custodia aunque el cluster no exista. El stack anidado no puede quedar vacio."
+        must:
+          - "El valor sigue a DeployCloudHsm"
+    Properties:
+      Name: !Sub /${ProjectName}/${Environment}/opcion-a/cloudhsm
+      Type: String
+      Value: !Ref DeployCloudHsm
+      Description: true solo si este stack creo el cluster
+  Cluster:
+    Type: AWS::CloudHSMV2::Cluster
+    Condition: UseHsm
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "Custodia dedicada. La Lambda actual sigue firmando con KMS; el HSM queda listo para un cliente PKCS#11."
+        must:
+          - "hsm2m.medium"
+          - "Dos subredes"
+          - "No crear si DeployCloudHsm es false"
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      HsmType: hsm2m.medium
+      SubnetIds:
+        - !Ref SubnetA
+        - !Ref SubnetB
+      BackupRetentionPolicy:
+        Type: DAYS
+        Value: "7"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Option
+          Value: opcion-a
+  HsmA:
+    Type: AWS::CloudHSMV2::HSM
+    Condition: UseHsm
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ClusterId: !Ref Cluster
+      AvailabilityZone: !Ref AzA
+  HsmB:
+    Type: AWS::CloudHSMV2::HSM
+    Condition: UseHsm
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ClusterId: !Ref Cluster
+      AvailabilityZone: !Ref AzB
+Outputs:
+  CloudHsmMode:
+    Value: !Ref DeployCloudHsm
+  ClusterId:
+    Condition: UseHsm
+    Value: !Ref Cluster

@@ -1,0 +1,173 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Roles de opcion-a — cada funcion solo tiene las acciones de su paso."
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: "API prefirma PUT, S3 sin-firmar avisa a SQS y Lambda firma con KMS hacia firmados"
+    must:
+      - "Sin politicas administradas amplias"
+      - "kms:Sign limitado al ARN de la llave"
+    ref:
+      - at: context/compartido.yaml
+        has: convenciones comunes de cifrado, custodia y carpetas
+        scope: shared
+      - at: requerimientos.txt
+        has: pedido de vias asincronas y endpoint sincrono
+        scope: shared
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: firma-digital
+    AllowedPattern: "^[a-z0-9-]{1,20}$"
+    Description: Prefijo de nombres. Minusculas, numeros y guion.
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, prod]
+    Description: Entorno. Tambien es el nombre del stage de API Gateway.
+
+  UnsignedPrefix:
+    Type: String
+    Default: sin-firmar/
+    AllowedPattern: "^sin-firmar/$"
+    Description: Prefijo de entrada. La regla de 7 dias usa este valor.
+  SignedPrefix:
+    Type: String
+    Default: firmados/
+    AllowedPattern: "^firmados/$"
+    Description: Prefijo de salida de los PDF firmados.
+  CorsAllowedOrigin:
+    Type: String
+    Default: https://localhost
+    AllowedPattern: "^https://.+"
+    Description: Origen permitido en CORS. En produccion usar el dominio real.
+
+  BucketArn:
+    Type: String
+    AllowedPattern: "^arn:aws[a-z0-9-]*:s3:::.+"
+    Description: ARN del bucket de documentos.
+  KeyArn:
+    Type: String
+    AllowedPattern: "^arn:aws[a-z0-9-]*:kms:[a-z0-9-]+:[0-9]{12}:key/.+"
+    Description: ARN de la llave de firma.
+  QueueArn:
+    Type: String
+    AllowedPattern: "^arn:aws[a-z0-9-]*:sqs:[a-z0-9-]+:[0-9]{12}:.+"
+    Description: ARN de la cola de trabajo o de fallos.
+Resources:
+
+  PresignRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "Solo puede emitir PUT sobre sin-firmar."
+        must:
+          - "Sin kms:Sign"
+          - "Sin lectura de firmados"
+    Properties:
+
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+      Policies:
+        - PolicyName: presign
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-${Environment}-a-*
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-${Environment}-a-*:*
+
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub ${BucketArn}/${UnsignedPrefix}*
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Option
+          Value: opcion-a
+  SignerRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "Lee sin-firmar, escribe firmados y llama a kms:Sign."
+        must:
+          - "kms:Sign acotado a la llave de esta opcion"
+    Properties:
+
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+      Policies:
+        - PolicyName: firmar
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-${Environment}-a-*
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-${Environment}-a-*:*
+
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub ${BucketArn}/${UnsignedPrefix}*
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Ref BucketArn
+                Condition:
+                  StringLike:
+                    s3:prefix: !Sub ${UnsignedPrefix}*
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub ${BucketArn}/${SignedPrefix}*
+              - Effect: Allow
+                Action:
+                  - kms:Sign
+                  - kms:GetPublicKey
+                Resource: !Ref KeyArn
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ChangeMessageVisibility
+                Resource: !Ref QueueArn
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Option
+          Value: opcion-a
+
+Outputs:
+
+  PresignRoleArn:
+    Value: !GetAtt PresignRole.Arn
+  SignerRoleArn:
+    Value: !GetAtt SignerRole.Arn

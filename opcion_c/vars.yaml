@@ -1,0 +1,21 @@
+# Parametros de opcion-c. No es una plantilla.
+# 1. Publicar esta carpeta:
+#    aws s3 sync opcion_c s3://NOMBRE-BUCKET/opcion_c --exclude "*" --include "*.yaml"
+# 2. Desplegar el stack raiz (el archivo local; los hijos salen de S3):
+#    aws cloudformation deploy \
+#      --template-file opcion_c/template_main.yaml \
+#      --stack-name firma-opcion-c \
+#      --capabilities CAPABILITY_IAM \
+#      --parameter-overrides \
+#        TemplatesBaseUrl=https://NOMBRE-BUCKET.s3.${AWS::Region}.amazonaws.com/opcion_c \
+#        ProjectName=firma-digital Environment=dev DeployCloudHsm=false \
+#        CorsAllowedOrigin=https://localhost ApiRevision=1
+# DeployCloudHsm=true crea dos HSM y empieza el cargo por hora.
+TemplatesBaseUrl: https://NOMBRE-BUCKET.s3.REGION.amazonaws.com/opcion_c
+ProjectName: firma-digital
+Environment: dev
+DeployCloudHsm: "false"
+CorsAllowedOrigin: https://localhost
+UnsignedPrefix: sin-firmar/
+SignedPrefix: firmados/
+ApiRevision: "1"

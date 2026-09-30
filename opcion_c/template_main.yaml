@@ -1,0 +1,160 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Stack raiz de opcion-c — anida red, llave, bucket, roles, Lambdas y API. CloudHSM queda apagado."
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: "API Gateway recibe el PDF o una clave S3 y Lambda firma en la misma llamada"
+    must:
+      - "TemplatesBaseUrl apunta a esta carpeta en S3, sin barra final"
+      - "DeployCloudHsm por defecto false"
+    ref:
+      - at: context/compartido.yaml
+        has: convenciones comunes de cifrado, custodia y carpetas
+        scope: shared
+      - at: requerimientos.txt
+        has: pedido de vias asincronas y endpoint sincrono
+        scope: shared
+
+Parameters:
+  TemplatesBaseUrl:
+    Type: String
+    AllowedPattern: "^https://.+"
+    ConstraintDescription: URL https del prefijo de las plantillas, sin barra final.
+    Description: Prefijo HTTPS donde se publicaron los templates anidados. Sin barra final.
+
+  ProjectName:
+    Type: String
+    Default: firma-digital
+    AllowedPattern: "^[a-z0-9-]{1,20}$"
+    Description: Prefijo de nombres. Minusculas, numeros y guion.
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, prod]
+    Description: Entorno. Tambien es el nombre del stage de API Gateway.
+
+  DeployCloudHsm:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: true crea dos HSM y asocia las Lambdas a la VPC. Cada HSM se cobra por hora.
+
+  UnsignedPrefix:
+    Type: String
+    Default: sin-firmar/
+    AllowedPattern: "^sin-firmar/$"
+    Description: Prefijo de entrada. La regla de 7 dias usa este valor.
+  SignedPrefix:
+    Type: String
+    Default: firmados/
+    AllowedPattern: "^firmados/$"
+    Description: Prefijo de salida de los PDF firmados.
+  CorsAllowedOrigin:
+    Type: String
+    Default: https://localhost
+    AllowedPattern: "^https://.+"
+    Description: Origen permitido en CORS. En produccion usar el dominio real.
+
+  ApiRevision:
+    Type: String
+    Default: "1"
+    Description: Subir este valor publica de nuevo el stage.
+
+Resources:
+  VpcStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub ${TemplatesBaseUrl}/vpc/tamplate.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        DeployCloudHsm: !Ref DeployCloudHsm
+  KmsStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub ${TemplatesBaseUrl}/kms/tamplate.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+  SqsStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub ${TemplatesBaseUrl}/sqs/tamplate.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+  S3Stack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub ${TemplatesBaseUrl}/s3/tamplate.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        UnsignedPrefix: !Ref UnsignedPrefix
+        SignedPrefix: !Ref SignedPrefix
+        CorsAllowedOrigin: !Ref CorsAllowedOrigin
+
+  IamStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub ${TemplatesBaseUrl}/iam/tamplate.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        UnsignedPrefix: !Ref UnsignedPrefix
+        SignedPrefix: !Ref SignedPrefix
+        CorsAllowedOrigin: !Ref CorsAllowedOrigin
+        BucketArn: !GetAtt S3Stack.Outputs.BucketArn
+        KeyArn: !GetAtt KmsStack.Outputs.KeyArn
+        QueueArn: !GetAtt SqsStack.Outputs.QueueArn
+  LambdaStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub ${TemplatesBaseUrl}/lambda/tamplate.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        DeployCloudHsm: !Ref DeployCloudHsm
+        UnsignedPrefix: !Ref UnsignedPrefix
+        SignedPrefix: !Ref SignedPrefix
+        CorsAllowedOrigin: !Ref CorsAllowedOrigin
+        BucketName: !GetAtt S3Stack.Outputs.BucketName
+        KeyArn: !GetAtt KmsStack.Outputs.KeyArn
+        SubnetA: !GetAtt VpcStack.Outputs.SubnetA
+        SubnetB: !GetAtt VpcStack.Outputs.SubnetB
+        LambdaSecurityGroupId: !GetAtt VpcStack.Outputs.LambdaSecurityGroupId
+        QueueUrl: !GetAtt SqsStack.Outputs.QueueUrl
+        SyncRoleArn: !GetAtt IamStack.Outputs.SyncRoleArn
+
+  ApiStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub ${TemplatesBaseUrl}/apigateway/tamplate.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        CorsAllowedOrigin: !Ref CorsAllowedOrigin
+        ApiRevision: !Ref ApiRevision
+        FunctionArn: !GetAtt LambdaStack.Outputs.SyncFunctionArn
+  CloudHsmStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub ${TemplatesBaseUrl}/cloudhsm/tamplate.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        DeployCloudHsm: !Ref DeployCloudHsm
+        SubnetA: !GetAtt VpcStack.Outputs.SubnetA
+        SubnetB: !GetAtt VpcStack.Outputs.SubnetB
+        AzA: !GetAtt VpcStack.Outputs.AzA
+        AzB: !GetAtt VpcStack.Outputs.AzB
+Outputs:
+  BucketName:
+    Value: !GetAtt S3Stack.Outputs.BucketName
+  KeyArn:
+    Value: !GetAtt KmsStack.Outputs.KeyArn
+  ApiUrl:
+    Value: !GetAtt ApiStack.Outputs.ApiUrl
+  CloudHsmMode:
+    Value: !GetAtt CloudHsmStack.Outputs.CloudHsmMode

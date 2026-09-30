@@ -1,0 +1,206 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Bucket de documentos de opcion-b — sin-firmar expira a los 7 dias y firmados se conserva."
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: "DataSync deposita en sin-firmar; Scheduler cada 15 min lista y Lambda firma con KMS"
+    must:
+      - "Block Public Access en los cuatro controles"
+      - "Deny si aws:SecureTransport es false"
+      - "Versionado y Retain"
+    ref:
+      - at: context/compartido.yaml
+        has: convenciones comunes de cifrado, custodia y carpetas
+        scope: shared
+      - at: requerimientos.txt
+        has: pedido de vias asincronas y endpoint sincrono
+        scope: shared
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: firma-digital
+    AllowedPattern: "^[a-z0-9-]{1,20}$"
+    Description: Prefijo de nombres. Minusculas, numeros y guion.
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, prod]
+    Description: Entorno. Tambien es el nombre del stage de API Gateway.
+
+  UnsignedPrefix:
+    Type: String
+    Default: sin-firmar/
+    AllowedPattern: "^sin-firmar/$"
+    Description: Prefijo de entrada. La regla de 7 dias usa este valor.
+  SignedPrefix:
+    Type: String
+    Default: firmados/
+    AllowedPattern: "^firmados/$"
+    Description: Prefijo de salida de los PDF firmados.
+  CorsAllowedOrigin:
+    Type: String
+    Default: https://localhost
+    AllowedPattern: "^https://.+"
+    Description: Origen permitido en CORS. En produccion usar el dominio real.
+
+  SourceLocationArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:.+"
+    Description: ARN de la ubicacion DataSync de origen. Vacio omite la tarea.
+  DataSyncSchedule:
+    Type: String
+    Default: cron(0 * * * ? *)
+    Description: Agenda de la tarea DataSync. Solo aplica si hay origen.
+
+Conditions:
+  HasSource: !Not [!Equals [!Ref SourceLocationArn, ""]]
+
+Resources:
+  DocumentsBucket:
+    Type: AWS::S3::Bucket
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "Guarda el PDF de entrada y el de salida. El aviso a SQS, si existe, filtra sin-firmar/*.pdf."
+        must:
+          - "SSE-S3, no la llave de firma"
+          - "ExpirationInDays 7 solo en sin-firmar/"
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpiraSinFirmar
+            Status: Enabled
+            Filter:
+              Prefix: !Ref UnsignedPrefix
+            ExpirationInDays: 7
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ["*"]
+            AllowedMethods: [GET, PUT, HEAD]
+            AllowedOrigins:
+              - !Ref CorsAllowedOrigin
+            MaxAge: 300
+
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Option
+          Value: opcion-b
+  DocumentsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DocumentsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt DocumentsBucket.Arn
+              - !Sub ${DocumentsBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  DataSyncRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: datasync.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: s3-destino
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                  - s3:ListBucketMultipartUploads
+                Resource: !GetAtt DocumentsBucket.Arn
+              - Effect: Allow
+                Action:
+                  - s3:AbortMultipartUpload
+                  - s3:DeleteObject
+                  - s3:GetObject
+                  - s3:GetObjectTagging
+                  - s3:ListMultipartUploadParts
+                  - s3:PutObject
+                  - s3:PutObjectTagging
+                Resource: !Sub ${DocumentsBucket.Arn}/*
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Option
+          Value: opcion-b
+  DataSyncLocation:
+    Type: AWS::DataSync::LocationS3
+    Properties:
+      S3BucketArn: !GetAtt DocumentsBucket.Arn
+      Subdirectory: /sin-firmar
+      S3Config:
+        BucketAccessRoleArn: !GetAtt DataSyncRole.Arn
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Option
+          Value: opcion-b
+  DataSyncTask:
+    Type: AWS::DataSync::Task
+    Condition: HasSource
+    Properties:
+      SourceLocationArn: !Ref SourceLocationArn
+      DestinationLocationArn: !Ref DataSyncLocation
+      Schedule:
+        ScheduleExpression: !Ref DataSyncSchedule
+      Options:
+        VerifyMode: ONLY_FILES_TRANSFERRED
+        OverwriteMode: ALWAYS
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Option
+          Value: opcion-b
+Outputs:
+  BucketName:
+    Value: !Ref DocumentsBucket
+  BucketArn:
+    Value: !GetAtt DocumentsBucket.Arn
+
+  DataSyncLocationArn:
+    Value: !Ref DataSyncLocation

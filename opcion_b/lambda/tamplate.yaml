@@ -1,0 +1,241 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Lambdas de opcion-b — Graviton, fuera de la VPC salvo CloudHSM, codigo embebido."
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: "DataSync deposita en sin-firmar; Scheduler cada 15 min lista y Lambda firma con KMS"
+    must:
+      - "Handler index.handler porque ZipFile se publica como index.py"
+      - "Log group con retencion de 30 dias creado antes que la funcion"
+    ref:
+      - at: context/compartido.yaml
+        has: convenciones comunes de cifrado, custodia y carpetas
+        scope: shared
+      - at: requerimientos.txt
+        has: pedido de vias asincronas y endpoint sincrono
+        scope: shared
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: firma-digital
+    AllowedPattern: "^[a-z0-9-]{1,20}$"
+    Description: Prefijo de nombres. Minusculas, numeros y guion.
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, prod]
+    Description: Entorno. Tambien es el nombre del stage de API Gateway.
+
+  DeployCloudHsm:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: true crea dos HSM y asocia las Lambdas a la VPC. Cada HSM se cobra por hora.
+
+  UnsignedPrefix:
+    Type: String
+    Default: sin-firmar/
+    AllowedPattern: "^sin-firmar/$"
+    Description: Prefijo de entrada. La regla de 7 dias usa este valor.
+  SignedPrefix:
+    Type: String
+    Default: firmados/
+    AllowedPattern: "^firmados/$"
+    Description: Prefijo de salida de los PDF firmados.
+  CorsAllowedOrigin:
+    Type: String
+    Default: https://localhost
+    AllowedPattern: "^https://.+"
+    Description: Origen permitido en CORS. En produccion usar el dominio real.
+
+  SubnetA:
+    Type: String
+    Description: Subred privada A. Se usa si DeployCloudHsm=true.
+  SubnetB:
+    Type: String
+    Description: Subred privada B. Se usa si DeployCloudHsm=true.
+  LambdaSecurityGroupId:
+    Type: String
+    Description: Security group de salida de las Lambdas.
+
+  BucketName:
+    Type: String
+    Description: Nombre del bucket de documentos.
+  KeyArn:
+    Type: String
+    Description: ARN de la llave de firma.
+  QueueArn:
+    Type: String
+    Description: ARN de la cola de fallos.
+  QueueUrl:
+    Type: String
+    Description: URL de la cola de fallos.
+  LoteRoleArn:
+    Type: String
+    Description: Rol de la Lambda de lote.
+  SchedulerRoleArn:
+    Type: String
+    Description: Rol con el que Scheduler invoca la Lambda.
+  ProcessSchedule:
+    Type: String
+    Default: rate(15 minutes)
+    Description: Frecuencia del procesamiento del prefijo sin-firmar.
+
+Conditions:
+  UseHsm: !Equals [!Ref DeployCloudHsm, "true"]
+
+Resources:
+
+  BLoteLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ProjectName}-${Environment}-b-lote
+      RetentionInDays: 30
+  BLoteFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: BLoteLogGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "Lista hasta 20 PDF por ciclo. Scheduler y API usan la misma funcion."
+        must:
+          - "arm64"
+          - "ZipFile bajo 4 KB"
+          - "VpcConfig solo con DeployCloudHsm=true"
+    Properties:
+      FunctionName: !Sub ${ProjectName}-${Environment}-b-lote
+      Role: !Ref LoteRoleArn
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      Handler: index.handler
+      Timeout: 300
+      MemorySize: 1024
+      ReservedConcurrentExecutions: 1
+      Code:
+        ZipFile: |
+          import base64
+          import hashlib
+          import os
+
+          import boto3
+          from botocore.exceptions import ClientError
+
+          s3 = boto3.client("s3")
+          kms = boto3.client("kms")
+          BUCKET = os.environ["BUCKET"]
+          SIGNED = os.environ["SIGNED_PREFIX"]
+          KEY_ID = os.environ["KMS_KEY_ID"]
+
+
+          def already(key):
+              try:
+                  s3.head_object(Bucket=BUCKET, Key=key)
+                  return True
+              except ClientError as exc:
+                  if exc.response["Error"]["Code"] in ("404", "NoSuchKey", "NotFound"):
+                      return False
+                  raise
+
+
+          def sign_bytes(doc_id, data):
+              out = f"{SIGNED}{doc_id}.pdf"
+              if already(out):
+                  return out
+              digest = hashlib.sha256(data).digest()
+              sig = kms.sign(
+                  KeyId=KEY_ID,
+                  Message=digest,
+                  MessageType="DIGEST",
+                  SigningAlgorithm="ECDSA_SHA_256",
+              )["Signature"]
+              s3.put_object(
+                  Bucket=BUCKET,
+                  Key=out,
+                  Body=data,
+                  ContentType="application/pdf",
+                  Metadata={"firma-sha256": digest.hex(), "firma-kms": base64.b64encode(sig).decode()},
+              )
+              s3.put_object(Bucket=BUCKET, Key=out + ".sig", Body=sig)
+              return out
+
+
+          import json
+
+          UNSIGNED = os.environ["UNSIGNED_PREFIX"]
+          ORIGIN = os.environ["CORS_ORIGIN"]
+
+
+          def handler(event, context):
+              done = 0
+              token = None
+              while done < 20:
+                  args = {"Bucket": BUCKET, "Prefix": UNSIGNED, "MaxKeys": 20}
+                  if token:
+                      args["ContinuationToken"] = token
+                  page = s3.list_objects_v2(**args)
+                  for item in page.get("Contents", []):
+                      key = item["Key"]
+                      if not key.endswith(".pdf"):
+                          continue
+                      doc_id = key.rsplit("/", 1)[-1][:-4]
+                      data = s3.get_object(Bucket=BUCKET, Key=key)["Body"].read()
+                      sign_bytes(doc_id, data)
+                      done += 1
+                      if done >= 20:
+                          break
+                  if done >= 20 or not page.get("IsTruncated"):
+                      break
+                  token = page.get("NextContinuationToken")
+              return {
+                  "statusCode": 200,
+                  "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": ORIGIN},
+                  "body": json.dumps({"procesados": done}),
+              }
+      Environment:
+        Variables:
+          BUCKET: !Ref BucketName
+          UNSIGNED_PREFIX: !Ref UnsignedPrefix
+          SIGNED_PREFIX: !Ref SignedPrefix
+          KMS_KEY_ID: !Ref KeyArn
+          CORS_ORIGIN: !Ref CorsAllowedOrigin
+          QUEUE_URL: !Ref QueueUrl
+      VpcConfig: !If
+        - UseHsm
+        - SecurityGroupIds:
+            - !Ref LambdaSecurityGroupId
+          SubnetIds:
+            - !Ref SubnetA
+            - !Ref SubnetB
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Option
+          Value: opcion-b
+
+  BatchSchedule:
+    Type: AWS::Scheduler::Schedule
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "Dispara el lote aunque no haya un POST. Varios ciclos vacios no mueven el costo."
+        must:
+          - "rate(15 minutes) por defecto"
+          - "Una sola ejecucion concurrente"
+    Properties:
+      Description: Procesa sin-firmar cada 15 minutos
+      ScheduleExpression: !Ref ProcessSchedule
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      State: ENABLED
+      Target:
+        Arn: !GetAtt BLoteFunction.Arn
+        RoleArn: !Ref SchedulerRoleArn
+
+Outputs:
+
+  LoteFunctionArn:
+    Value: !GetAtt BLoteFunction.Arn

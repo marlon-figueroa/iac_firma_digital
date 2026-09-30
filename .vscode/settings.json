@@ -1,0 +1,17 @@
+{
+  "yaml.customTags": [
+    "!Not sequence",
+    "!Equals sequence",
+    "!Ref scalar",
+    "!Sub scalar",
+    "!Sub sequence",
+    "!GetAtt scalar",
+    "!Select sequence",
+    "!Split sequence"
+  ],
+  "yaml.disableSchemaDetection": [
+    "api_gateway/template.yaml",
+    "eks/template.yaml"
+  ],
+  "cfnLint.path": "cfn-lint"
+}

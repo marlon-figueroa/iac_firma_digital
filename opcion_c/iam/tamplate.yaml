@@ -1,0 +1,121 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Roles de opcion-c — cada funcion solo tiene las acciones de su paso."
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: "API Gateway recibe el PDF o una clave S3 y Lambda firma en la misma llamada"
+    must:
+      - "Sin politicas administradas amplias"
+      - "kms:Sign limitado al ARN de la llave"
+    ref:
+      - at: context/compartido.yaml
+        has: convenciones comunes de cifrado, custodia y carpetas
+        scope: shared
+      - at: requerimientos.txt
+        has: pedido de vias asincronas y endpoint sincrono
+        scope: shared
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: firma-digital
+    AllowedPattern: "^[a-z0-9-]{1,20}$"
+    Description: Prefijo de nombres. Minusculas, numeros y guion.
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, prod]
+    Description: Entorno. Tambien es el nombre del stage de API Gateway.
+
+  UnsignedPrefix:
+    Type: String
+    Default: sin-firmar/
+    AllowedPattern: "^sin-firmar/$"
+    Description: Prefijo de entrada. La regla de 7 dias usa este valor.
+  SignedPrefix:
+    Type: String
+    Default: firmados/
+    AllowedPattern: "^firmados/$"
+    Description: Prefijo de salida de los PDF firmados.
+  CorsAllowedOrigin:
+    Type: String
+    Default: https://localhost
+    AllowedPattern: "^https://.+"
+    Description: Origen permitido en CORS. En produccion usar el dominio real.
+
+  BucketArn:
+    Type: String
+    AllowedPattern: "^arn:aws[a-z0-9-]*:s3:::.+"
+    Description: ARN del bucket de documentos.
+  KeyArn:
+    Type: String
+    AllowedPattern: "^arn:aws[a-z0-9-]*:kms:[a-z0-9-]+:[0-9]{12}:key/.+"
+    Description: ARN de la llave de firma.
+  QueueArn:
+    Type: String
+    AllowedPattern: "^arn:aws[a-z0-9-]*:sqs:[a-z0-9-]+:[0-9]{12}:.+"
+    Description: ARN de la cola de trabajo o de fallos.
+Resources:
+
+  SyncRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "Archiva el PDF de la llamada, lo firma y encola el error si falla."
+        must:
+          - "kms:Sign solo sobre la llave de esta opcion"
+    Properties:
+
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+      Policies:
+        - PolicyName: sincrono
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-${Environment}-c-*
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-${Environment}-c-*:*
+
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub ${BucketArn}/${UnsignedPrefix}*
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub ${BucketArn}/${UnsignedPrefix}*
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub ${BucketArn}/${SignedPrefix}*
+              - Effect: Allow
+                Action:
+                  - kms:Sign
+                  - kms:GetPublicKey
+                Resource: !Ref KeyArn
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !Ref QueueArn
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Option
+          Value: opcion-c
+
+Outputs:
+
+  SyncRoleArn:
+    Value: !GetAtt SyncRole.Arn

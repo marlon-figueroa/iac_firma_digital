@@ -1,0 +1,21 @@
+# Contexto de diseño compartido por opcion_a, opcion_b y opcion_c.
+# No es una plantilla de CloudFormation.
+arch: >
+  Tres vias de firma sobre las carpetas sin-firmar/ y firmados/ del mismo
+  modelo de bucket. A recibe el PDF por URL prefirmada y lo procesa con SQS.
+  B lo deposita con DataSync y lo procesa por lote. C lo firma en la llamada
+  de API Gateway.
+must:
+  - El bucket bloquea el acceso publico y niega s3:* si aws:SecureTransport es false
+  - Una llave de KMS de la cuenta por servicio: ECC P-256 solo firma; una simetrica cifra el bucket con SSE-KMS; otra simetrica cifra SQS. Sin SSE-S3 ni llaves aws/s3 o aws/sqs
+  - La firma del hash es KMS ECC P-256 con ECDSA_SHA_256
+  - DeployCloudHsm queda en false salvo decision explicita: cada HSM se cobra por hora
+  - Con CloudHSM activo se crean dos HSM hsm2m.medium en dos zonas
+  - Un custom key store de KMS no firma PDF: solo admite llaves AES
+  - Las Lambdas van en Graviton y fuera de la VPC, salvo que CloudHSM este activo
+  - API Gateway exige AWS_IAM; no queda anonima
+notas:
+  - La Lambda guarda el PDF en firmados/ y la firma separada en un objeto .sig.
+    Embeber PAdES en el PDF requiere una capa con la libreria de firma.
+  - Plantillas anidadas: subir la carpeta de la opcion a S3 y desplegar template_main.yaml
+    con CAPABILITY_IAM.

@@ -1,0 +1,236 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Red privada de opcion-b — sin NAT; los endpoints de interfaz solo existen si CloudHSM esta activo."
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: "DataSync deposita en sin-firmar; Scheduler cada 15 min lista y Lambda firma con KMS"
+    must:
+      - "Sin IGW ni NAT"
+      - "El egress de la Lambda queda limitado al CIDR de la VPC"
+      - "Endpoints de interfaz solo con DeployCloudHsm=true"
+    ref:
+      - at: context/compartido.yaml
+        has: convenciones comunes de cifrado, custodia y carpetas
+        scope: shared
+      - at: requerimientos.txt
+        has: pedido de vias asincronas y endpoint sincrono
+        scope: shared
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: firma-digital
+    AllowedPattern: "^[a-z0-9-]{1,20}$"
+    Description: Prefijo de nombres. Minusculas, numeros y guion.
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, prod]
+    Description: Entorno. Tambien es el nombre del stage de API Gateway.
+
+  DeployCloudHsm:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: true crea dos HSM y asocia las Lambdas a la VPC. Cada HSM se cobra por hora.
+
+Conditions:
+  UseHsm: !Equals [!Ref DeployCloudHsm, "true"]
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "Red de firma. Las Lambdas salen de ella solo si el HSM esta activo."
+        must:
+          - "EnableDnsHostnames y EnableDnsSupport para Private DNS de los endpoints"
+    Properties:
+      CidrBlock: 10.43.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Option
+          Value: opcion-b
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-opcion-b
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: 10.43.1.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Option
+          Value: opcion-b
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: 10.43.2.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Option
+          Value: opcion-b
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Option
+          Value: opcion-b
+  AssocA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetA
+      RouteTableId: !Ref RouteTable
+  AssocB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetB
+      RouteTableId: !Ref RouteTable
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref RouteTable
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "Salida solo hacia el CIDR de la VPC, en 443 y en los puertos del cliente CloudHSM."
+        must:
+          - "Prohibido 0.0.0.0/0"
+          - "Sin ingress"
+    Properties:
+      GroupDescription: Egress de Lambdas hacia la VPC
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.43.0.0/16
+          Description: HTTPS a endpoints de interfaz
+        - IpProtocol: tcp
+          FromPort: 2223
+          ToPort: 2225
+          CidrIp: 10.43.0.0/16
+          Description: Cliente CloudHSM dentro de la VPC
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Option
+          Value: opcion-b
+  EndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: UseHsm
+    Properties:
+      GroupDescription: Interface endpoints de KMS, SQS, logs y STS
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.43.0.0/16
+          Description: Clientes de la VPC
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.43.0.0/16
+          Description: Respuestas dentro de la VPC
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Option
+          Value: opcion-b
+  KmsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: UseHsm
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.kms
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref SubnetA
+        - !Ref SubnetB
+      SecurityGroupIds:
+        - !Ref EndpointSecurityGroup
+  SqsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: UseHsm
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.sqs
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref SubnetA
+        - !Ref SubnetB
+      SecurityGroupIds:
+        - !Ref EndpointSecurityGroup
+  LogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: UseHsm
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.logs
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref SubnetA
+        - !Ref SubnetB
+      SecurityGroupIds:
+        - !Ref EndpointSecurityGroup
+  StsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: UseHsm
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.sts
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref SubnetA
+        - !Ref SubnetB
+      SecurityGroupIds:
+        - !Ref EndpointSecurityGroup
+Outputs:
+  VpcId:
+    Value: !Ref Vpc
+  SubnetA:
+    Value: !Ref SubnetA
+  SubnetB:
+    Value: !Ref SubnetB
+  AzA:
+    Value: !GetAtt SubnetA.AvailabilityZone
+  AzB:
+    Value: !GetAtt SubnetB.AvailabilityZone
+  LambdaSecurityGroupId:
+    Value: !Ref LambdaSecurityGroup
