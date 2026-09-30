@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Endpoint de URL prefirmada",
+    "output": "docs/arquitectura/url-prefirmada.secuencia.html",
+    "viewBox": [1440, 920],
+    "quality_profile": "showcase",
+    "column_fit": "spread",
+    "views": [
+      {
+        "id": "llamada",
+        "label": "Llamada",
+        "focus": ["portal", "apigw", "prefirma"],
+        "note": "El portal pide la URL con AWS_IAM y recibe el PUT de 15 minutos."
+      },
+      {
+        "id": "subida",
+        "label": "Subida",
+        "focus": ["portal", "s3", "kms"],
+        "note": "El PDF va directo a S3. La llave del bucket cifra el objeto."
+      },
+      {
+        "id": "aviso",
+        "label": "Aviso",
+        "focus": ["s3", "sqs"],
+        "note": "ObjectCreated deja el PDF en la cola para la Lambda firmadora."
+      }
+    ]
+  },
+  "participants": [
+    { "id": "portal", "type": "external", "label": "Portal", "sublabel": "aplicación" },
+    { "id": "apigw", "type": "cloud", "label": "API Gateway", "sublabel": "AWS_IAM" },
+    { "id": "prefirma", "type": "cloud", "label": "Lambda prefirma", "sublabel": "Graviton" },
+    { "id": "s3", "type": "cloud", "label": "Amazon S3", "sublabel": "sin-firmar/" },
+    { "id": "kms", "type": "security", "label": "KMS bucket", "sublabel": "llave simétrica" },
+    { "id": "sqs", "type": "messagebus", "label": "Amazon SQS", "sublabel": "cola de trabajo" }
+  ],
+  "segments": [
+    { "from": 170, "to": 370, "label": "Llamada" },
+    { "from": 400, "to": 630, "label": "Subida" },
+    { "from": 650, "to": 760, "label": "Aviso" }
+  ],
+  "messages": [
+    { "id": "post-carga", "from": "portal", "to": "apigw", "y": 200, "label": "POST /documentos/carga", "variant": "security" },
+    { "id": "invoca", "from": "apigw", "to": "prefirma", "y": 255, "label": "invoca", "variant": "emphasis" },
+    { "id": "url-json", "from": "prefirma", "to": "apigw", "y": 315, "label": "200 · URL PUT 15 min", "variant": "return" },
+    { "id": "respuesta", "from": "apigw", "to": "portal", "y": 370, "label": "200 JSON", "variant": "return" },
+    { "id": "put-pdf", "from": "portal", "to": "s3", "y": 450, "label": "PUT sin-firmar/{id}.pdf", "variant": "emphasis" },
+    { "id": "data-key", "from": "s3", "to": "kms", "y": 510, "label": "GenerateDataKey", "variant": "security" },
+    { "id": "clave", "from": "kms", "to": "s3", "y": 565, "label": "data key", "variant": "return" },
+    { "id": "put-ok", "from": "s3", "to": "portal", "y": 630, "label": "200", "variant": "return" },
+    { "id": "evento", "from": "s3", "to": "sqs", "y": 710, "label": "ObjectCreated .pdf", "variant": "dashed" }
+  ],
+  "activations": [
+    { "participant": "apigw", "from": 200, "to": 380, "type": "cloud" },
+    { "participant": "prefirma", "from": 255, "to": 325, "type": "cloud" },
+    { "participant": "s3", "from": 450, "to": 720, "type": "cloud" },
+    { "participant": "kms", "from": 510, "to": 575, "type": "security" },
+    { "participant": "sqs", "from": 710, "to": 760, "type": "messagebus" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "La URL",
+      "items": [
+        "POST /documentos/carga exige AWS_IAM",
+        "La Lambda devuelve un PUT de 15 minutos sobre sin-firmar/{id}.pdf",
+        "El PDF no pasa por API Gateway"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Cifrado",
+      "items": [
+        "La URL lleva aws:kms y la llave simétrica del bucket",
+        "S3 pide GenerateDataKey a esa llave al recibir el PUT",
+        "No se usa SSE-S3 ni la llave aws/s3"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Después del PUT",
+      "items": [
+        "ObjectCreated de sin-firmar/*.pdf entra a SQS",
+        "La cola usa su propia llave KMS",
+        "La Lambda firmadora consume el mensaje fuera de esta llamada"
+      ]
+    }
+  ]
+}
