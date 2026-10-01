@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Opción B: Transferencia con DataSync y Procesamiento por Lote",
+    "output": "docs/arquitectura/opcion-b.html",
+    "viewBox": [1200, 560],
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "ingesta",
+        "label": "Ingesta DataSync",
+        "focus": ["servidor_local", "datasync", "s3_in", "kms_s3"],
+        "note": "Transferencia segura desde origen local hacia S3 sin-firmar/."
+      },
+      {
+        "id": "disparadores",
+        "label": "Disparadores de lote",
+        "focus": ["scheduler", "apigw", "lambda_lote"],
+        "note": "Ejecución periódica por EventBridge o demanda vía API Gateway."
+      },
+      {
+        "id": "firma_dlq",
+        "label": "Firma y cola de fallos",
+        "focus": ["lambda_lote", "kms_sign", "s3_out", "sqs_dlq", "kms_sqs"],
+        "note": "Firma asimétrica, persistencia en S3 y desvío de errores a DLQ."
+      }
+    ]
+  },
+  "components": [
+    { "id": "servidor_local", "type": "external", "label": "Servidor Origen", "sublabel": "on-premise / NFS", "pos": [30, 220], "size": [130, 60] },
+    { "id": "datasync", "type": "cloud", "label": "AWS DataSync", "sublabel": "agente y tarea", "pos": [230, 220], "size": [130, 60] },
+    { "id": "s3_in", "type": "cloud", "label": "S3 sin-firmar/", "sublabel": "SSE-KMS bucket", "pos": [450, 220], "size": [130, 60] },
+    { "id": "lambda_lote", "type": "backend", "label": "Lambda Lote", "sublabel": "lotes hasta 20", "pos": [740, 220], "size": [140, 60] },
+    { "id": "scheduler", "type": "cloud", "label": "EventBridge Scheduler", "sublabel": "cron 15 min", "pos": [450, 70], "size": [150, 60] },
+    { "id": "apigw", "type": "cloud", "label": "API Gateway", "sublabel": "POST /procesar", "pos": [740, 70], "size": [140, 60] },
+    { "id": "s3_out", "type": "cloud", "label": "S3 firmados/", "sublabel": "PDF + .sig", "pos": [1010, 70], "size": [130, 60] },
+    { "id": "sqs_dlq", "type": "messagebus", "label": "SQS DLQ", "sublabel": "fallos de lote", "pos": [1010, 220], "size": [130, 60] },
+    { "id": "kms_s3", "type": "security", "label": "KMS Llave Bucket", "sublabel": "simétrica SSE-KMS", "pos": [450, 390], "size": [130, 60] },
+    { "id": "kms_sign", "type": "security", "label": "KMS Llave Firma", "sublabel": "ECC NIST P-256", "pos": [740, 390], "size": [140, 60] },
+    { "id": "kms_sqs", "type": "security", "label": "KMS Llave DLQ", "sublabel": "simétrica cola", "pos": [1010, 390], "size": [130, 60] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "AWS us-east-1", "wraps": ["datasync", "s3_in", "scheduler", "apigw", "lambda_lote", "s3_out", "sqs_dlq", "kms_s3", "kms_sign", "kms_sqs"], "pad": 16 }
+  ],
+  "connections": [
+    { "from": "servidor_local", "to": "datasync", "label": "sincroniza", "variant": "emphasis", "labelDy": -24 },
+    { "from": "datasync", "to": "s3_in", "label": "PUT lote", "variant": "emphasis", "labelDy": -24 },
+    { "from": "s3_in", "to": "lambda_lote", "label": "lote PDFs", "variant": "emphasis", "labelDy": -24 },
+    { "from": "scheduler", "to": "lambda_lote", "label": "cron 15m", "variant": "default", "fromSide": "bottom", "toSide": "top" },
+    { "from": "apigw", "to": "lambda_lote", "label": "POST /lotes/procesar", "variant": "default", "fromSide": "bottom", "toSide": "top", "labelDy": 30 },
+    { "from": "lambda_lote", "to": "s3_out", "label": "PUT firmado", "variant": "emphasis", "fromSide": "top", "toSide": "bottom" },
+    { "from": "lambda_lote", "to": "sqs_dlq", "label": "fallos a DLQ", "variant": "dashed", "labelDy": -24 },
+    { "from": "s3_in", "to": "kms_s3", "label": "GenerateDataKey", "variant": "security", "fromSide": "bottom", "toSide": "top", "labelDy": 30 },
+    { "from": "lambda_lote", "to": "kms_sign", "label": "kms:Sign", "variant": "security", "fromSide": "bottom", "toSide": "top", "labelDy": 30 },
+    { "from": "sqs_dlq", "to": "kms_sqs", "label": "cifrado DLQ", "variant": "security", "fromSide": "bottom", "toSide": "top", "labelDy": 30 }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Transferencia por Lote",
+      "items": [
+        "Servidor local sincroniza documentos mediante agente AWS DataSync",
+        "Archivos depositados directamente en S3 sin-firmar/ con cifrado SSE-KMS",
+        "DataSync gestiona reintentos de red y validación de integridad hash"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Cifrado por Servicio (CMK)",
+      "items": [
+        "Una llave simétrica KMS dedicada para cifrado del bucket S3 (SSE-KMS)",
+        "Una llave simétrica KMS dedicada para cifrado de la cola SQS DLQ",
+        "Una llave asimétrica ECC NIST P-256 exclusiva para firma digital"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Procesamiento y Fallos",
+      "items": [
+        "EventBridge Scheduler ejecuta cada 15 min; API Gateway permite disparo manual",
+        "Lambda en Graviton procesa hasta 20 PDFs por invocación sin timeout de API",
+        "Fallos individuales se dirigen a SQS DLQ sin interrumpir el lote completo"
+      ]
+    }
+  ]
+}
