@@ -4,7 +4,7 @@
   "meta": {
     "title": "Endpoint de URL prefirmada",
     "output": "docs/arquitectura/url-prefirmada.secuencia.html",
-    "viewBox": [1440, 920],
+    "viewBox": [1080, 900],
     "quality_profile": "showcase",
     "column_fit": "spread",
     "views": [
@@ -29,7 +29,7 @@
     ]
   },
   "participants": [
-    { "id": "portal", "type": "external", "label": "Portal", "sublabel": "aplicación" },
+    { "id": "portal", "type": "external", "label": "Portal", "sublabel": "cliente" },
     { "id": "apigw", "type": "cloud", "label": "API Gateway", "sublabel": "AWS_IAM" },
     { "id": "prefirma", "type": "cloud", "label": "Lambda prefirma", "sublabel": "Graviton" },
     { "id": "s3", "type": "cloud", "label": "Amazon S3", "sublabel": "sin-firmar/" },
@@ -37,27 +37,27 @@
     { "id": "sqs", "type": "messagebus", "label": "Amazon SQS", "sublabel": "cola de trabajo" }
   ],
   "segments": [
-    { "from": 170, "to": 370, "label": "Llamada" },
-    { "from": 400, "to": 630, "label": "Subida" },
-    { "from": 650, "to": 760, "label": "Aviso" }
+    { "from": 175, "to": 390, "label": "Llamada" },
+    { "from": 420, "to": 650, "label": "Subida" },
+    { "from": 680, "to": 800, "label": "Aviso" }
   ],
   "messages": [
-    { "id": "post-carga", "from": "portal", "to": "apigw", "y": 200, "label": "POST /documentos/carga", "variant": "security" },
-    { "id": "invoca", "from": "apigw", "to": "prefirma", "y": 255, "label": "invoca", "variant": "emphasis" },
-    { "id": "url-json", "from": "prefirma", "to": "apigw", "y": 315, "label": "200 · URL PUT 15 min", "variant": "return" },
-    { "id": "respuesta", "from": "apigw", "to": "portal", "y": 370, "label": "200 JSON", "variant": "return" },
-    { "id": "put-pdf", "from": "portal", "to": "s3", "y": 450, "label": "PUT sin-firmar/{id}.pdf", "variant": "emphasis" },
-    { "id": "data-key", "from": "s3", "to": "kms", "y": 510, "label": "GenerateDataKey", "variant": "security" },
-    { "id": "clave", "from": "kms", "to": "s3", "y": 565, "label": "data key", "variant": "return" },
-    { "id": "put-ok", "from": "s3", "to": "portal", "y": 630, "label": "200", "variant": "return" },
-    { "id": "evento", "from": "s3", "to": "sqs", "y": 710, "label": "ObjectCreated .pdf", "variant": "dashed" }
+    { "id": "post-carga", "from": "portal", "to": "apigw", "y": 210, "label": "POST /documentos/carga", "variant": "security" },
+    { "id": "invoca", "from": "apigw", "to": "prefirma", "y": 260, "label": "invoca", "variant": "emphasis" },
+    { "id": "url-json", "from": "prefirma", "to": "apigw", "y": 310, "label": "200 · URL PUT 15 min", "variant": "return" },
+    { "id": "respuesta", "from": "apigw", "to": "portal", "y": 360, "label": "200 JSON", "variant": "return" },
+    { "id": "put-pdf", "from": "portal", "to": "s3", "y": 460, "label": "PUT sin-firmar/{id}.pdf", "variant": "emphasis" },
+    { "id": "data-key", "from": "s3", "to": "kms", "y": 520, "label": "GenerateDataKey", "variant": "security" },
+    { "id": "clave", "from": "kms", "to": "s3", "y": 570, "label": "data key", "variant": "return" },
+    { "id": "put-ok", "from": "s3", "to": "portal", "y": 620, "label": "200", "variant": "return" },
+    { "id": "evento", "from": "s3", "to": "sqs", "y": 740, "label": "ObjectCreated .pdf", "variant": "dashed" }
   ],
   "activations": [
-    { "participant": "apigw", "from": 200, "to": 380, "type": "cloud" },
-    { "participant": "prefirma", "from": 255, "to": 325, "type": "cloud" },
-    { "participant": "s3", "from": 450, "to": 720, "type": "cloud" },
-    { "participant": "kms", "from": 510, "to": 575, "type": "security" },
-    { "participant": "sqs", "from": 710, "to": 760, "type": "messagebus" }
+    { "participant": "apigw", "from": 210, "to": 370, "type": "cloud" },
+    { "participant": "prefirma", "from": 260, "to": 320, "type": "cloud" },
+    { "participant": "s3", "from": 460, "to": 750, "type": "cloud" },
+    { "participant": "kms", "from": 520, "to": 580, "type": "security" },
+    { "participant": "sqs", "from": 740, "to": 790, "type": "messagebus" }
   ],
   "cards": [
     {
