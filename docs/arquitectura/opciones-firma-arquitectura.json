@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Comparativo de opciones de firma digital",
+    "output": "docs/arquitectura/opciones-firma-arquitectura.html",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "comparativo-principal",
+        "label": "Comparativo principal",
+        "focus": ["users", "apiA", "schedulerB", "apiC", "s3UnsignedA", "s3UnsignedB", "s3SignedA", "s3SignedB", "s3SignedC"],
+        "note": "Cada opción comparte la misma base de S3 y KMS, pero cambia el origen del documento y la latencia esperada."
+      },
+      {
+        "id": "opcion-a",
+        "label": "Opción A: URL prefirmada + SQS",
+        "focus": ["users", "apiA", "lambdaPresign", "s3UnsignedA", "sqsA", "lambdaSignerA", "s3SignedA", "kmsA"],
+        "note": "El portal obtiene un PUT prefirmado, sube el PDF directo a S3 y la cola dispara la firma asíncrona."
+      },
+      {
+        "id": "opcion-b",
+        "label": "Opción B: DataSync + lote programado",
+        "focus": ["usersB", "dataSync", "s3UnsignedB", "schedulerB", "lambdaBatchB", "s3SignedB", "kmsB"],
+        "note": "Los lotes se copian a S3, se procesan cada 15 minutos y generan la versión firmada en un ciclo periódico."
+      },
+      {
+        "id": "opcion-c",
+        "label": "Opción C: firma síncrona",
+        "focus": ["users", "apiC", "lambdaSync", "kmsC", "s3SignedC"],
+        "note": "La llamada del usuario entrega el PDF o la referencia a S3 y la Lambda firma en la misma respuesta."
+      }
+    ]
+  },
+  "components": [
+    { "id": "users", "type": "external", "label": "Portal / cliente", "sublabel": "usuario o app", "pos": [60, 350], "size": [150, 68] },
+    { "id": "apiA", "type": "cloud", "label": "API Gateway", "sublabel": "Opción A", "pos": [270, 220], "size": [150, 68] },
+    { "id": "lambdaPresign", "type": "backend", "label": "Lambda prefirma", "sublabel": "genera URL PUT", "pos": [500, 220], "size": [170, 78] },
+    { "id": "s3UnsignedA", "type": "database", "label": "S3 sin-firmar", "sublabel": "prefijo /sin-firmar", "pos": [760, 220], "size": [170, 78] },
+    { "id": "kmsA", "type": "security", "label": "KMS", "sublabel": "llave de cifrado", "pos": [760, 440], "size": [170, 70] },
+    { "id": "sqsA", "type": "messagebus", "label": "SQS", "sublabel": "ObjectCreated", "pos": [1030, 220], "size": [150, 68] },
+    { "id": "lambdaSignerA", "type": "backend", "label": "Lambda firmadora", "sublabel": "responde al evento", "pos": [1290, 220], "size": [180, 78] },
+    { "id": "s3SignedA", "type": "database", "label": "S3 firmados", "sublabel": "prefijo /firmados", "pos": [1560, 220], "size": [170, 78] },
+    { "id": "usersB", "type": "external", "label": "Agente / file share", "sublabel": "origen de lote", "pos": [60, 620], "size": [170, 78] },
+    { "id": "dataSync", "type": "cloud", "label": "DataSync", "sublabel": "copia por lotes", "pos": [290, 620], "size": [150, 72] },
+    { "id": "s3UnsignedB", "type": "database", "label": "S3 sin-firmar", "sublabel": "Opción B", "pos": [760, 620], "size": [170, 78] },
+    { "id": "schedulerB", "type": "cloud", "label": "EventBridge Scheduler", "sublabel": "cada 15 min", "pos": [510, 620], "size": [180, 78] },
+    { "id": "lambdaBatchB", "type": "backend", "label": "Lambda de lote", "sublabel": "firma pendientes", "pos": [1030, 620], "size": [170, 78] },
+    { "id": "kmsB", "type": "security", "label": "KMS", "sublabel": "llave de firma", "pos": [1040, 780], "size": [170, 70] },
+    { "id": "s3SignedB", "type": "database", "label": "S3 firmados", "sublabel": "Opción B", "pos": [1290, 620], "size": [170, 78] },
+    { "id": "apiC", "type": "cloud", "label": "API Gateway", "sublabel": "Opción C", "pos": [270, 840], "size": [150, 68] },
+    { "id": "lambdaSync", "type": "backend", "label": "Lambda síncrona", "sublabel": "firma en la llamada", "pos": [500, 840], "size": [180, 78] },
+    { "id": "kmsC", "type": "security", "label": "KMS", "sublabel": "firma asimétrica", "pos": [760, 840], "size": [170, 70] },
+    { "id": "s3SignedC", "type": "database", "label": "S3 firmados", "sublabel": "Opción C", "pos": [1030, 840], "size": [170, 78] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "Opción A · URL prefirmada + SQS", "wraps": ["apiA", "lambdaPresign", "s3UnsignedA", "kmsA", "sqsA", "lambdaSignerA", "s3SignedA"], "pad": 28 },
+    { "kind": "region", "label": "Opción B · DataSync + lote", "wraps": ["dataSync", "schedulerB", "s3UnsignedB", "lambdaBatchB", "kmsB", "s3SignedB"], "pad": 28 },
+    { "kind": "region", "label": "Opción C · firma síncrona", "wraps": ["apiC", "lambdaSync", "kmsC", "s3SignedC"], "pad": 20 }
+  ],
+  "connections": [
+    { "id": "users-to-apiA", "from": "users", "to": "apiA", "label": "POST /documentos/carga", "variant": "emphasis" },
+    { "id": "apiA-to-presign", "from": "apiA", "to": "lambdaPresign", "label": "invoca" },
+    { "id": "presign-to-s3unsignedA", "from": "lambdaPresign", "to": "s3UnsignedA", "label": "URL PUT 15 min" },
+    { "id": "portal-to-s3unsignedA", "from": "users", "to": "s3UnsignedA", "label": "PUT PDF", "variant": "security", "fromSide": "right", "toSide": "left" },
+    { "id": "s3unsignedA-to-kmsA", "from": "s3UnsignedA", "to": "kmsA", "label": "GenerateDataKey", "variant": "security" },
+    { "id": "kmsA-to-s3unsignedA", "from": "kmsA", "to": "s3UnsignedA", "label": "data key", "variant": "security" },
+    { "id": "s3unsignedA-to-sqsA", "from": "s3UnsignedA", "to": "sqsA", "label": "ObjectCreated", "variant": "dashed" },
+    { "id": "sqsA-to-signerA", "from": "sqsA", "to": "lambdaSignerA", "label": "mensaje" },
+    { "id": "signerA-to-s3signedA", "from": "lambdaSignerA", "to": "s3SignedA", "label": "escribe PDF firmado" },
+    { "id": "usersB-to-datasync", "from": "usersB", "to": "dataSync", "label": "copia lote", "variant": "emphasis" },
+    { "id": "datasync-to-s3unsignedB", "from": "dataSync", "to": "s3UnsignedB", "label": "depósito" },
+    { "id": "schedulerB-to-lambdaBatchB", "from": "schedulerB", "to": "lambdaBatchB", "label": "rate(15 min)" },
+    { "id": "lambdaBatchB-to-s3unsignedB", "from": "lambdaBatchB", "to": "s3UnsignedB", "label": "lista pendientes" },
+    { "id": "s3unsignedB-to-kmsB", "from": "s3UnsignedB", "to": "kmsB", "label": "firma hash", "variant": "security" },
+    { "id": "kmsB-to-s3signedB", "from": "kmsB", "to": "s3SignedB", "label": "devuelve firma", "variant": "security" },
+    { "id": "lambdaBatchB-to-s3signedB", "from": "lambdaBatchB", "to": "s3SignedB", "label": "escribe firmados" },
+    { "id": "users-to-apiC", "from": "users", "to": "apiC", "label": "POST /documentos/firmar", "variant": "emphasis" },
+    { "id": "apiC-to-lambdaSync", "from": "apiC", "to": "lambdaSync", "label": "invoca" },
+    { "id": "lambdaSync-to-kmsC", "from": "lambdaSync", "to": "kmsC", "label": "Sign" },
+    { "id": "kmsC-to-s3SignedC", "from": "kmsC", "to": "s3SignedC", "label": "guarda PDF firmado", "variant": "security" },
+    { "id": "lambdaSync-to-s3SignedC", "from": "lambdaSync", "to": "s3SignedC", "label": "respuesta JSON" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Opción A", "items": ["Portal obtiene una URL PUT de 15 minutos", "El PDF va directo a S3 y no pasa por API Gateway", "ObjectCreated desencadena la Lambda firmadora y la cola SQS"] },
+    { "dot": "emerald", "title": "Opción B", "items": ["DataSync deposita el lote en sin-firmar", "EventBridge lanza la Lambda cada 15 minutos", "La firma ocurre en un ciclo periódico y es más apropiada para archivos masivos"] },
+    { "dot": "rose", "title": "Opción C", "items": ["La llamada HTTP lleva el PDF o la clave del objeto", "La firma ocurre dentro de la misma respuesta del cliente", "Es la opción más cercana a un endpoint síncrono con latencia de llamada"] }
+  ]
+}
