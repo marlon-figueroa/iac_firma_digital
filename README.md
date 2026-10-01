@@ -22,34 +22,62 @@ Todas las opciones contemplan aislamiento criptográfico estricto mediante clave
 
 ## 2. Vías de Procesamiento y Opciones de Arquitectura
 
-```
-                       +-------------------------------------------------------+
-                       |              CANALES DE ENTRADA Y FIRMA               |
-                       +-------------------------------------------------------+
-                                   |                       |
-       [Opción A: Prefirmada]      |    [Opción B: Lotes]  |    [Opción C: Síncrona]
-       POST /carga (API GW)        |    Agente DataSync    |    POST /documentos/firmar
-                 |                 |           |           |              |
-       URL PUT S3 (15 min)         |    Copia masiva NAS   |      Payload / Clave S3
-                 |                 |           |           |              |
-                 v                 |           v           |              v
-       s3://.../sin-firmar/ <------+-----------+           |       Lambda Firmadora
-                 |                                         |              |
-         ObjectCreated                                     |              |
-                 |                                         |              |
-                 v                                         |              |
-             Cola SQS                                      |              |
-                 |                                         |              |
-                 v                                         |              |
-       Lambda Firmadora (SQS)    Lambda Lote (Scheduler)   |              |
-                 |                         |               |              |
-                 +-------------------------+---------------+--------------+
-                                           |
-                                   Firma del Hash
-                          (AWS KMS ECC P-256 o CloudHSM)
-                                           |
-                                           v
-                                  s3://.../firmados/
+```mermaid
+flowchart TD
+    %% TRES VÍAS PARALELAS E INDEPENDIENTES
+    subgraph OPT_A["Opción A — Asíncrona (URL Prefirmada y SQS)"]
+        direction TB
+        ClientA["Portal / Cliente Web"]
+        ApiPre["API Gateway + Lambda Prefirma<br/>(POST /carga • Genera URL)"]
+        S3_InA[("s3://.../sin-firmar/<br/>(Subida con URL PUT temporal 15 min)")]
+        SQS["Amazon SQS (+ DLQ)<br/>(Buffer de eventos ObjectCreated)"]
+        WorkerA["Lambda Firmadora A<br/>(Worker SQS arm64 Graviton)"]
+
+        ClientA -->|1. Solicita prefirma| ApiPre
+        ClientA ==>|2. Carga directa PUT| S3_InA
+        ApiPre -.->|Habilita carga segura| S3_InA
+        S3_InA -->|3. Evento ObjectCreated| SQS
+        SQS -->|4. Lote de mensajes| WorkerA
+    end
+
+    subgraph OPT_B["Opción B — Por Lotes (DataSync y Scheduler)"]
+        direction TB
+        NAS["Servidor Local / NAS<br/>(Documentos PDF On-Premises)"]
+        DataSync["AWS DataSync Agent<br/>(Transferencia continua / programada)"]
+        S3_InB[("s3://.../sin-firmar/<br/>(Depósito masivo de archivos)")]
+        Scheduler["EventBridge Scheduler<br/>(Cron: cada 15 min)"]
+        WorkerB["Lambda Lote B<br/>(Procesador masivo arm64 Graviton)"]
+
+        NAS -->|1. Sincronización segura| DataSync
+        DataSync ==>|2. Copia en bloque| S3_InB
+        S3_InB -.->|3. Documentos pendientes| WorkerB
+        Scheduler -->|4. Disparo programado| WorkerB
+    end
+
+    subgraph OPT_C["Opción C — Síncrona (API REST Inmediata)"]
+        direction TB
+        ClientC["Aplicación Cliente<br/>(Integración backend directa)"]
+        ApiC["Amazon API Gateway REST<br/>(POST /documentos/firmar • SigV4)"]
+        WorkerC["Lambda Firmadora C<br/>(Procesamiento en memoria • Tope 29 s)"]
+        RespC["Respuesta HTTP 200 OK<br/>(Hash firmado + Metadatos inmediatos)"]
+
+        ClientC -->|1. Envía documento / clave| ApiC
+        ApiC -->|2. Invocación síncrona| WorkerC
+        WorkerC -.->|3. Respuesta inmediata| RespC
+    end
+
+    %% CUSTODIA Y SALIDA UNIFICADA
+    subgraph CRYPTO_CORE["Custodia Criptográfica y Almacenamiento Final"]
+        direction TB
+        KMS["Módulo Criptográfico de Firma Digital (FIPS 140-3 Nivel 3)<br/>• AWS KMS (Por Defecto): Clave asimétrica ECC NIST P-256 (ECDSA_SHA_256)<br/>• AWS CloudHSM (Opcional): Clúster dedicado 2x hsm2m.medium monoinquilino<br/>• Aislamiento total: la clave privada nunca sale del hardware criptográfico"]
+        S3_Out[("s3://.../firmados/<br/>• Documento PDF con firma PAdES embebida y archivo .sig desacoplado<br/>• Cifrado en reposo SSE-KMS administrado por el cliente")]
+        KMS -->|Persistencia de documentos sellados| S3_Out
+    end
+
+    %% Conexiones desde cada vía hacia el módulo criptográfico
+    WorkerA -->|Firma hash SHA-256| KMS
+    WorkerB -->|Firma hash SHA-256| KMS
+    WorkerC -->|Firma hash SHA-256| KMS
 ```
 
 ### Opción A — Carga por URL Prefirmada y Cola SQS (Asíncrona)
@@ -58,14 +86,88 @@ Todas las opciones contemplan aislamiento criptográfico estricto mediante clave
 * **Procesamiento:** La Lambda firmadora consume los mensajes en lotes de hasta 10 documentos, calcula el hash SHA-256 del archivo, solicita la firma a AWS KMS o CloudHSM, y deposita el archivo en `firmados/{id}.pdf` junto a su firma criptográfica.
 * **Resiliencia:** Si ocurre un error, el mensaje cuenta con 3 intentos (`maxReceiveCount: 3`) antes de ser enviado a una Dead Letter Queue (**SQS DLQ**).
 
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Cliente as Portal / Cliente
+    participant API as API Gateway
+    participant Pre as Lambda Prefirma
+    participant S3In as S3 sin-firmar/
+    participant SQS as Cola SQS
+    participant Sign as Lambda Firmadora
+    participant KMS as AWS KMS (ECC P-256)
+    participant S3Out as S3 firmados/
+    participant DLQ as SQS DLQ
+
+    Cliente->>API: POST /carga (nombre: doc.pdf)
+    API->>Pre: Invocación con credenciales IAM
+    Pre->>Pre: Genera doc_id (UUIDv4)
+    Pre->>S3In: Genera pre-signed URL PUT (15 min, SSE-KMS)
+    Pre-->>Cliente: Retorna {id, clave, url, expiraEn: 900}
+    Cliente->>S3In: PUT archivo.pdf directo a S3
+    S3In->>SQS: Notificación ObjectCreated
+    SQS->>Sign: Entrega lote de eventos
+    Sign->>S3In: GET objeto y calcula SHA-256
+    Sign->>KMS: kms:Sign (ECDSA_SHA_256)
+    KMS-->>Sign: Retorna firma digital
+    Sign->>S3Out: PUT archivo firmado + .sig (SSE-KMS)
+    opt Error recurrente (intentos > 3)
+        SQS->>DLQ: Envía mensaje a la DLQ
+    end
+```
+
 ### Opción B — Depósito por DataSync y Procesamiento por Lote (Batch)
 * **Ingesta:** Diseñada para entornos empresariales donde los documentos se originan en servidores de archivos locales, NAS o almacenamiento on-premises. Un agente de **AWS DataSync** sincroniza los archivos hacia el prefijo `sin-firmar/`.
 * **Disparador:** **Amazon EventBridge Scheduler** ejecuta una Lambda de procesamiento por lote cada 15 minutos.
 * **Procesamiento:** La Lambda itera los documentos acumulados, firma cada uno de ellos y los mueve al prefijo `firmados/`. Aquellos que no alcancen a procesarse dentro de la ventana de ejecución continúan en el siguiente ciclo.
 
+```mermaid
+flowchart LR
+    subgraph OnPremises["Origen On-Premises"]
+        NAS["File Share / NAS<br/>(Archivos PDF)"]
+    end
+
+    subgraph AWSCloud["Nube AWS (us-east-1)"]
+        DataSync["AWS DataSync Agent"]
+        S3In[("S3 sin-firmar/<br/>(SSE-KMS)")]
+        Scheduler["EventBridge Scheduler<br/>(Cron: cada 15 min)"]
+        LambdaLote["Lambda Lote B<br/>(Graviton arm64)"]
+        KMS["AWS KMS<br/>(ECC NIST P-256)"]
+        S3Out[("S3 firmados/<br/>(PDF + .sig)")]
+    end
+
+    NAS -->|Sincronización segura| DataSync
+    DataSync -->|Copia masiva| S3In
+    Scheduler -->|Disparo programado| LambdaLote
+    LambdaLote -->|Lista y lee pendientes| S3In
+    LambdaLote -->|kms:Sign sobre hash| KMS
+    KMS -->|Retorna firma| LambdaLote
+    LambdaLote -->|Escribe PDF firmado| S3Out
+```
+
 ### Opción C — Endpoint REST Síncrono (Tiempo Real)
 * **Ingesta y Ejecución:** Expone el endpoint `POST /documentos/firmar` protegido con autorización `AWS_IAM` en Amazon API Gateway.
 * **Flujo:** Admite la carga directa del binario PDF (hasta 10 MB) en base64 o la referencia a un objeto existente en S3. La Lambda ejecuta la firma y responde en la misma conexión HTTP con la confirmación y la clave del archivo firmado. La llamada se mantiene dentro del límite de 29 segundos de API Gateway.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Cliente as Aplicación Cliente
+    participant API as API Gateway (REST)
+    participant Lambda as Lambda Firmadora C
+    participant KMS as AWS KMS (ECC P-256)
+    participant S3Out as S3 firmados/
+
+    Cliente->>API: POST /documentos/firmar (PDF base64 o clave S3)
+    Note over Cliente,API: Autenticación AWS_IAM (SigV4)
+    API->>Lambda: Invocación síncrona (timeout: 29 s)
+    Lambda->>Lambda: Valida tamaño (tope 10 MB) y calcula hash SHA-256
+    Lambda->>KMS: kms:Sign (ECDSA_SHA_256)
+    KMS-->>Lambda: Retorna firma criptográfica
+    Lambda->>S3Out: Escribe PDF firmado + .sig (SSE-KMS)
+    Lambda-->>API: 200 OK {id, clave, url_firmada}
+    API-->>Cliente: Respuesta JSON síncrona (< 2 s)
+```
 
 ---
 
@@ -77,6 +179,29 @@ Siguiendo el principio de menor privilegio y separación de funciones ([NIST SP 
 2. **Llave de Cifrado de Bucket S3 (Simétrica):** Clave AES-256 (`KeySpec: SYMMETRIC_DEFAULT`, `KeyUsage: ENCRYPT_DECRYPT`). Cifra todos los objetos en reposo mediante SSE-KMS. Las políticas del bucket rechazan cualquier subida en texto claro o con SSE-S3 (`aws:kms` obligatorio).
 3. **Llave de Colas SQS (Simétrica):** Cifra los mensajes en tránsito y en reposo de la cola de trabajo y la cola DLQ.
 4. **Llave de CloudWatch Logs (Simétrica):** Cifra los grupos de registros de auditoría y ejecución de las funciones Lambda.
+
+```mermaid
+flowchart TD
+    subgraph KMS_CMK["Claves Administradas por el Cliente (KMS CMK)"]
+        direction TB
+        KMS_SIGN["KMS Llave de Firma<br/>• Asimétrica (ECC_NIST_P256)<br/>• Uso: SIGN_VERIFY<br/>• Custodia de clave privada"]
+        KMS_S3["KMS Llave Bucket S3<br/>• Simétrica (AES-256-GCM)<br/>• Uso: ENCRYPT_DECRYPT<br/>• Rotación anual de clave"]
+        KMS_SQS["KMS Llave Colas SQS<br/>• Simétrica (AES-256-GCM)<br/>• Uso: ENCRYPT_DECRYPT<br/>• Reutilización Data Key: 5m"]
+        KMS_LOGS["KMS Llave CloudWatch Logs<br/>• Simétrica (AES-256-GCM)<br/>• Uso: ENCRYPT_DECRYPT<br/>• Cifrado de auditoría"]
+    end
+
+    subgraph RECURSOS["Servicios y Componentes Protegidos"]
+        LAMBDA["Lambdas Firmadoras<br/>(Calculan SHA-256 y firman)"]
+        S3["Bucket S3<br/>(sin-firmar/ y firmados/)"]
+        SQS["Colas SQS<br/>(Trabajo y DLQ)"]
+        LOGS["Grupos de Registros<br/>(CloudWatch Logs)"]
+    end
+
+    LAMBDA -->|kms:Sign (ECDSA_SHA_256)| KMS_SIGN
+    S3 -->|SSE-KMS GenerateDataKey| KMS_S3
+    SQS -->|Cifrado en reposo y tránsito| KMS_SQS
+    LOGS -->|Cifrado de eventos de log| KMS_LOGS
+```
 
 ### Estándar de Firma (CMS / PAdES)
 La firma electrónica avanzada se genera siguiendo el estándar **CMS (Cryptographic Message Syntax)** y el perfil **PAdES (PDF Advanced Electronic Signatures)**:
@@ -91,6 +216,33 @@ La firma electrónica avanzada se genera siguiendo el estándar **CMS (Cryptogra
 ### ¿Por qué CloudHSM permanece «apagado» por defecto?
 En **AWS CloudHSM no existe un comando de suspensión o pausa temporal** (como el *Stop* de una instancia EC2). Un módulo HSM aprovisionado es una tarjeta PCIe física dedicada monoinquilino que AWS factura ininterrumpidamente a **$1.60 USD/hora por HSM**:
 $$\text{Costo base Clúster HA (2 HSM)} = 2 \times \$1.60 \times 730\text{ h} \approx \$2,336\text{ USD/mes}$$
+
+```mermaid
+flowchart TD
+    Start{"¿Normativa exige hardware monoinquilino<br/>dedicado FIPS 140-3 Nivel 3?"}
+
+    Start -->|No (Recomendado)| ModeKMS["DeployCloudHsm = 'false'<br/>(CloudHSM Apagado)"]
+    Start -->|Sí (Banca / Auditoría Especial)| ModeHSM["DeployCloudHsm = 'true'<br/>(CloudHSM Encendido)"]
+
+    subgraph ARCH_KMS["Arquitectura con AWS KMS"]
+        direction TB
+        K1["Hardware: 0 HSM aprovisionados ($0.00/mes)"]
+        K2["Red: Lambdas fuera de VPC (sin VPC Endpoints)"]
+        K3["Firma: kms:Sign con ECC NIST P-256"]
+        K4["Costo Total: ~$10.63 USD/mes (10k docs)"]
+    end
+
+    subgraph ARCH_HSM["Arquitectura con AWS CloudHSM"]
+        direction TB
+        H1["Hardware: 2x HSM hsm2m.medium en 2 AZs ($2,336/mes)"]
+        H2["Red: Lambdas dentro de VPC + 2 VPC Endpoints ($29.20/mes)"]
+        H3["Firma: Cliente PKCS#11 / JCE contra IP privada de HSM"]
+        H4["Costo Total: ~$2,375.61 USD/mes (10k docs)"]
+    end
+
+    ModeKMS ==> ARCH_KMS
+    ModeHSM ==> ARCH_HSM
+```
 
 En este proyecto, el parámetro de CloudFormation:
 ```yaml
