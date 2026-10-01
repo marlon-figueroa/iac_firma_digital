@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Opción A: Carga por URL Prefirmada y Cola SQS",
+    "output": "docs/arquitectura/opcion-a.html",
+    "viewBox": [1200, 560],
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "carga",
+        "label": "Carga y URL prefirmada",
+        "focus": ["portal", "apigw", "lambda_pre", "s3_in"],
+        "note": "El cliente obtiene una URL PUT de 15 min y sube directo a S3 con SSE-KMS."
+      },
+      {
+        "id": "cola",
+        "label": "Desacople y cola SQS",
+        "focus": ["s3_in", "sqs_work", "sqs_dlq", "lambda_sig"],
+        "note": "S3 notifica a SQS; la cola entrega lotes a la Lambda firmadora con DLQ."
+      },
+      {
+        "id": "firma",
+        "label": "Firma y almacenamiento",
+        "focus": ["lambda_sig", "kms_sign", "s3_out", "kms_s3", "kms_sqs"],
+        "note": "Firma asimétrica con llave ECC dedicada y persistencia en firmados/."
+      }
+    ]
+  },
+  "components": [
+    { "id": "portal", "type": "external", "label": "Portal Cliente", "sublabel": "cliente IAM", "pos": [30, 220], "size": [120, 60] },
+    { "id": "apigw", "type": "cloud", "label": "API Gateway", "sublabel": "POST /carga", "pos": [210, 220], "size": [120, 60] },
+    { "id": "lambda_pre", "type": "backend", "label": "Lambda Prefirma", "sublabel": "PUT 15 min", "pos": [390, 220], "size": [120, 60] },
+    { "id": "s3_in", "type": "cloud", "label": "S3 sin-firmar/", "sublabel": "SSE-KMS bucket", "pos": [580, 220], "size": [130, 60] },
+    { "id": "sqs_work", "type": "messagebus", "label": "SQS Cola Trabajo", "sublabel": "cifrada KMS SQS", "pos": [790, 220], "size": [130, 60] },
+    { "id": "lambda_sig", "type": "backend", "label": "Lambda Firmadora", "sublabel": "Graviton worker", "pos": [1010, 220], "size": [130, 60] },
+    { "id": "sqs_dlq", "type": "messagebus", "label": "SQS DLQ", "sublabel": "tras 3 fallos", "pos": [790, 70], "size": [130, 60] },
+    { "id": "s3_out", "type": "cloud", "label": "S3 firmados/", "sublabel": "PDF + .sig", "pos": [1010, 70], "size": [130, 60] },
+    { "id": "kms_s3", "type": "security", "label": "KMS Llave Bucket", "sublabel": "simétrica SSE-KMS", "pos": [580, 390], "size": [130, 60] },
+    { "id": "kms_sqs", "type": "security", "label": "KMS Llave SQS", "sublabel": "simétrica cola", "pos": [790, 390], "size": [130, 60] },
+    { "id": "kms_sign", "type": "security", "label": "KMS Llave Firma", "sublabel": "ECC NIST P-256", "pos": [1010, 390], "size": [130, 60] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "AWS us-east-1", "wraps": ["apigw", "lambda_pre", "s3_in", "sqs_work", "sqs_dlq", "lambda_sig", "s3_out", "kms_s3", "kms_sqs", "kms_sign"], "pad": 16 }
+  ],
+  "connections": [
+    { "from": "portal", "to": "apigw", "label": "POST /carga", "variant": "emphasis", "labelDy": -24 },
+    { "from": "apigw", "to": "lambda_pre", "label": "invoca", "variant": "default", "labelDy": -24 },
+    { "from": "portal", "to": "s3_in", "label": "PUT sin-firmar/", "variant": "emphasis", "fromSide": "bottom", "toSide": "bottom", "labelDy": 24 },
+    { "from": "s3_in", "to": "sqs_work", "label": "ObjectCreated", "variant": "emphasis", "labelDy": -24 },
+    { "from": "sqs_work", "to": "lambda_sig", "label": "lote eventos", "variant": "emphasis", "labelDy": -24 },
+    { "from": "sqs_work", "to": "sqs_dlq", "label": "maxReceive 3", "variant": "dashed", "fromSide": "top", "toSide": "bottom", "labelDy": -20 },
+    { "from": "lambda_sig", "to": "s3_out", "label": "PUT firmado", "variant": "emphasis", "fromSide": "top", "toSide": "bottom", "labelDy": -20 },
+    { "from": "s3_in", "to": "kms_s3", "label": "GenerateDataKey", "variant": "security", "fromSide": "bottom", "toSide": "top", "labelDy": 50 },
+    { "from": "sqs_work", "to": "kms_sqs", "label": "cifrado KMS", "variant": "security", "fromSide": "bottom", "toSide": "top", "labelDy": 30 },
+    { "from": "lambda_sig", "to": "kms_sign", "label": "kms:Sign", "variant": "security", "fromSide": "bottom", "toSide": "top", "labelDy": 30 }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Carga Asíncrona",
+      "items": [
+        "El cliente solicita URL prefirmada PUT de 15 min vía API Gateway (AWS_IAM)",
+        "El archivo sube directo a S3 sin transitar por API Gateway ni Lambda",
+        "S3 emite evento ObjectCreated hacia la cola de trabajo SQS"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Cifrado por Servicio (CMK)",
+      "items": [
+        "Una llave simétrica KMS dedicada para cifrado del bucket S3 (SSE-KMS)",
+        "Una llave simétrica KMS dedicada para cifrado de la cola SQS",
+        "Una llave asimétrica ECC NIST P-256 exclusiva para firma digital"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Resiliencia y Firma",
+      "items": [
+        "Lambda firmadora en Graviton consume mensajes y firma hash SHA-256",
+        "Documento y firma .sig quedan persistidos en firmados/",
+        "Fallos no recuperables pasan a SQS DLQ tras 3 reintentos"
+      ]
+    }
+  ]
+}
