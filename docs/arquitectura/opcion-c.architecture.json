@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Opción C: Firma Síncrona vía API Gateway",
+    "output": "docs/arquitectura/opcion-c.html",
+    "viewBox": [1200, 560],
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "llamada_api",
+        "label": "Invocación síncrona",
+        "focus": ["cliente", "apigw", "lambda_sync"],
+        "note": "Petición POST /documentos/firmar con AWS_IAM e invocación síncrona."
+      },
+      {
+        "id": "firma_kms",
+        "label": "Firma y almacenamiento",
+        "focus": ["lambda_sync", "kms_sign", "s3_out", "kms_s3"],
+        "note": "Firma asimétrica ECC y persistencia en S3 con SSE-KMS."
+      },
+      {
+        "id": "fallos_dlq",
+        "label": "Desvío a DLQ y origen",
+        "focus": ["lambda_sync", "s3_in", "sqs_dlq", "kms_sqs"],
+        "note": "Lectura opcional de sin-firmar/ y registro de fallos en DLQ."
+      }
+    ]
+  },
+  "components": [
+    { "id": "cliente", "type": "external", "label": "Cliente / App", "sublabel": "consumidor IAM", "pos": [30, 220], "size": [130, 60] },
+    { "id": "apigw", "type": "cloud", "label": "API Gateway", "sublabel": "POST /firmar (29s)", "pos": [260, 220], "size": [140, 60] },
+    { "id": "lambda_sync", "type": "backend", "label": "Lambda Firmadora", "sublabel": "síncrona Graviton", "pos": [510, 220], "size": [140, 60] },
+    { "id": "s3_out", "type": "cloud", "label": "S3 firmados/", "sublabel": "PDF + .sig", "pos": [760, 220], "size": [130, 60] },
+    { "id": "s3_in", "type": "cloud", "label": "S3 sin-firmar/", "sublabel": "origen si clave", "pos": [510, 70], "size": [140, 60] },
+    { "id": "sqs_dlq", "type": "messagebus", "label": "SQS DLQ", "sublabel": "fallos de firma", "pos": [760, 70], "size": [130, 60] },
+    { "id": "kms_sqs", "type": "security", "label": "KMS Llave DLQ", "sublabel": "simétrica cola", "pos": [990, 70], "size": [130, 60] },
+    { "id": "kms_sign", "type": "security", "label": "KMS Llave Firma", "sublabel": "ECC NIST P-256", "pos": [510, 390], "size": [140, 60] },
+    { "id": "kms_s3", "type": "security", "label": "KMS Llave Bucket", "sublabel": "simétrica SSE-KMS", "pos": [760, 390], "size": [130, 60] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "AWS us-east-1", "wraps": ["apigw", "lambda_sync", "s3_out", "s3_in", "sqs_dlq", "kms_sqs", "kms_sign", "kms_s3"], "pad": 16 }
+  ],
+  "connections": [
+    { "from": "cliente", "to": "apigw", "label": "POST /firmar", "variant": "emphasis", "labelDy": -24 },
+    { "from": "apigw", "to": "lambda_sync", "label": "invoca síncrono", "variant": "emphasis", "labelDy": -24 },
+    { "from": "lambda_sync", "to": "kms_sign", "label": "kms:Sign", "variant": "security", "fromSide": "bottom", "toSide": "top", "labelDy": 30 },
+    { "from": "lambda_sync", "to": "s3_out", "label": "PUT firmado", "variant": "emphasis", "labelDy": -24 },
+    { "from": "lambda_sync", "to": "s3_in", "label": "lee si clave", "variant": "default", "fromSide": "top", "toSide": "bottom", "labelDx": -25, "labelDy": -45 },
+    { "from": "lambda_sync", "to": "sqs_dlq", "label": "fallos a DLQ", "variant": "dashed", "fromSide": "top", "toSide": "bottom" },
+    { "from": "sqs_dlq", "to": "kms_sqs", "label": "cifrado DLQ", "variant": "security", "labelDy": -24 },
+    { "from": "s3_out", "to": "kms_s3", "label": "GenerateDataKey", "variant": "security", "fromSide": "bottom", "toSide": "top", "labelDy": 30 }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Firma Síncrona Inmediata",
+      "items": [
+        "API Gateway expone POST /documentos/firmar con AWS_IAM y timeout de 29s",
+        "Acepta documento en base64 (hasta 10 MB) o referencia por clave previa en S3",
+        "La respuesta retorna 200 con JSON de metadatos, clave y hash SHA-256"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Cifrado por Servicio (CMK)",
+      "items": [
+        "Una llave simétrica KMS dedicada para cifrado del bucket S3 (SSE-KMS)",
+        "Una llave simétrica KMS dedicada para la cola SQS DLQ",
+        "Una llave asimétrica ECC NIST P-256 exclusiva para firma digital"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Resiliencia y Rendimiento",
+      "items": [
+        "Firma con algoritmo ECDSA_SHA_256 en Lambda Graviton de alta eficiencia",
+        "Documento firmado y archivo .sig quedan almacenados en S3 firmados/",
+        "Fallos o excepciones no recuperables se envían a SQS DLQ para diagnóstico"
+      ]
+    }
+  ]
+}
