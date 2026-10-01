@@ -4,7 +4,7 @@
   "meta": {
     "title": "Endpoint de URL prefirmada",
     "output": "docs/arquitectura/url-prefirmada.secuencia.html",
-    "viewBox": [1080, 900],
+    "viewBox": [1080, 600],
     "quality_profile": "showcase",
     "column_fit": "spread",
     "views": [
@@ -37,27 +37,27 @@
     { "id": "sqs", "type": "messagebus", "label": "Amazon SQS", "sublabel": "cola de trabajo" }
   ],
   "segments": [
-    { "from": 175, "to": 390, "label": "Llamada" },
-    { "from": 420, "to": 650, "label": "Subida" },
-    { "from": 680, "to": 800, "label": "Aviso" }
+    { "from": 165, "to": 315, "label": "Llamada" },
+    { "from": 330, "to": 465, "label": "Subida" },
+    { "from": 480, "to": 540, "label": "Aviso" }
   ],
   "messages": [
-    { "id": "post-carga", "from": "portal", "to": "apigw", "y": 210, "label": "POST /documentos/carga", "variant": "security" },
-    { "id": "invoca", "from": "apigw", "to": "prefirma", "y": 260, "label": "invoca", "variant": "emphasis" },
-    { "id": "url-json", "from": "prefirma", "to": "apigw", "y": 310, "label": "200 · URL PUT 15 min", "variant": "return" },
-    { "id": "respuesta", "from": "apigw", "to": "portal", "y": 360, "label": "200 JSON", "variant": "return" },
-    { "id": "put-pdf", "from": "portal", "to": "s3", "y": 460, "label": "PUT sin-firmar/{id}.pdf", "variant": "emphasis" },
-    { "id": "data-key", "from": "s3", "to": "kms", "y": 520, "label": "GenerateDataKey", "variant": "security" },
-    { "id": "clave", "from": "kms", "to": "s3", "y": 570, "label": "data key", "variant": "return" },
-    { "id": "put-ok", "from": "s3", "to": "portal", "y": 620, "label": "200", "variant": "return" },
-    { "id": "evento", "from": "s3", "to": "sqs", "y": 740, "label": "ObjectCreated .pdf", "variant": "dashed" }
+    { "id": "post-carga", "from": "portal", "to": "apigw", "y": 185, "label": "POST /documentos/carga", "variant": "security" },
+    { "id": "invoca", "from": "apigw", "to": "prefirma", "y": 222, "label": "invoca", "variant": "emphasis" },
+    { "id": "url-json", "from": "prefirma", "to": "apigw", "y": 259, "label": "200 · URL PUT 15 min", "variant": "return" },
+    { "id": "respuesta", "from": "apigw", "to": "portal", "y": 296, "label": "200 JSON", "variant": "return" },
+    { "id": "put-pdf", "from": "portal", "to": "s3", "y": 350, "label": "PUT sin-firmar/{id}.pdf", "variant": "emphasis" },
+    { "id": "data-key", "from": "s3", "to": "kms", "y": 385, "label": "GenerateDataKey", "variant": "security" },
+    { "id": "clave", "from": "kms", "to": "s3", "y": 420, "label": "data key", "variant": "return" },
+    { "id": "put-ok", "from": "s3", "to": "portal", "y": 455, "label": "200", "variant": "return" },
+    { "id": "evento", "from": "s3", "to": "sqs", "y": 505, "label": "ObjectCreated .pdf", "variant": "dashed" }
   ],
   "activations": [
-    { "participant": "apigw", "from": 210, "to": 370, "type": "cloud" },
-    { "participant": "prefirma", "from": 260, "to": 320, "type": "cloud" },
-    { "participant": "s3", "from": 460, "to": 750, "type": "cloud" },
-    { "participant": "kms", "from": 520, "to": 580, "type": "security" },
-    { "participant": "sqs", "from": 740, "to": 790, "type": "messagebus" }
+    { "participant": "apigw", "from": 185, "to": 305, "type": "cloud" },
+    { "participant": "prefirma", "from": 222, "to": 270, "type": "cloud" },
+    { "participant": "s3", "from": 350, "to": 515, "type": "cloud" },
+    { "participant": "kms", "from": 385, "to": 430, "type": "security" },
+    { "participant": "sqs", "from": 505, "to": 530, "type": "messagebus" }
   ],
   "cards": [
     {
